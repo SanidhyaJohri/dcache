@@ -1,8 +1,6 @@
-
 version: '3.8'
 
 services:
-  # Development container with hot reload
   dev:
     build:
       context: .
@@ -11,131 +9,25 @@ services:
       - .:/app
       - go-cache:/go/pkg/mod
     ports:
-      - "8080:8080"      # Application port
-      - "2345:2345"      # Delve debugger port
-      - "6060:6060"      # pprof port
+      - "8080:8080"
+      - "6379:6379"
+      - "2345:2345"
     environment:
       - CGO_ENABLED=0
       - GOOS=linux
       - GOARCH=amd64
       - ENV=development
-    networks:
-      - dcache-net
-
-  # Cache Node 1
-  node1:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    ports:
-      - "9001:8080"
-      - "9101:9090"  # Metrics
-    environment:
+      - HTTP_PORT=8080
+      - TCP_PORT=6379
       - NODE_ID=node1
-      - NODE_PORT=8080
-      - CLUSTER_NODES=node1:8080,node2:8080,node3:8080
-      - REPLICATION_FACTOR=3
-    networks:
-      - dcache-net
-    depends_on:
-      - consul
-
-  # Cache Node 2
-  node2:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    ports:
-      - "9002:8080"
-      - "9102:9090"
-    environment:
-      - NODE_ID=node2
-      - NODE_PORT=8080
-      - CLUSTER_NODES=node1:8080,node2:8080,node3:8080
-      - REPLICATION_FACTOR=3
-    networks:
-      - dcache-net
-    depends_on:
-      - consul
-
-  # Cache Node 3
-  node3:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    ports:
-      - "9003:8080"
-      - "9103:9090"
-    environment:
-      - NODE_ID=node3
-      - NODE_PORT=8080
-      - CLUSTER_NODES=node1:8080,node2:8080,node3:8080
-      - REPLICATION_FACTOR=3
-    networks:
-      - dcache-net
-    depends_on:
-      - consul
-
-  # Service Discovery (optional)
-  consul:
-    image: consul:latest
-    ports:
-      - "8500:8500"
-      - "8600:8600/udp"
-    command: agent -dev -ui -client=0.0.0.0
-    networks:
-      - dcache-net
-
-  # Monitoring - Prometheus
-  prometheus:
-    image: prom/prometheus:latest
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./configs/prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus-data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-    networks:
-      - dcache-net
-
-  # Monitoring - Grafana
-  grafana:
-    image: grafana/grafana:latest
-    ports:
-      - "3000:3000"
-    environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_INSTALL_PLUGINS=redis-datasource
-    volumes:
-      - grafana-data:/var/lib/grafana
-      - ./configs/grafana/dashboards:/etc/grafana/provisioning/dashboards
-      - ./configs/grafana/datasources:/etc/grafana/provisioning/datasources
-    networks:
-      - dcache-net
-
-  # Log Aggregation (optional)
-  loki:
-    image: grafana/loki:latest
-    ports:
-      - "3100:3100"
-    volumes:
-      - ./configs/loki.yml:/etc/loki/local-config.yaml
-      - loki-data:/loki
+      - CAPACITY=10000
+      - MAX_SIZE_MB=100
     networks:
       - dcache-net
 
 volumes:
   go-cache:
-  prometheus-data:
-  grafana-data:
-  loki-data:
 
 networks:
   dcache-net:
     driver: bridge
-    ipam:
-      config:
-        - subnet: 172.28.0.0/16
