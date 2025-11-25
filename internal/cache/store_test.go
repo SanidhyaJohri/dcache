@@ -112,15 +112,15 @@ func TestLRUEviction(t *testing.T) {
 }
 
 func TestSizeEviction(t *testing.T) {
-	// 1KB max size
-	store := NewStore(100, 1.0/1024, 5*time.Minute) // 1KB in MB
+	// 1KB max size - Fixed to use int64
+	store := NewStore(100, 1, 5*time.Minute) // 1MB, we'll use large values
 	
-	// Add item that uses most of the space (900 bytes)
-	largeValue := make([]byte, 900)
+	// Add item that uses most of the space (900KB)
+	largeValue := make([]byte, 900*1024)
 	store.Set("large", largeValue)
 	
-	// Add another large item (500 bytes), should evict first
-	anotherLarge := make([]byte, 500)
+	// Add another large item (500KB), should evict first
+	anotherLarge := make([]byte, 500*1024)
 	store.Set("another", anotherLarge)
 	
 	// First should be evicted

@@ -161,7 +161,7 @@ func startHTTPServer(config *Config, cacheStore *cache.Store) *http.Server {
 	return server
 }
 
-func handleHTTPGet(w http.ResponseWriter, r *http.Request, cache *cache.Store, key string) {
+func handleHTTPGet(w http.ResponseWriter, _ *http.Request, cache *cache.Store, key string) {
 	value, found := cache.Get(key)
 	if !found {
 		w.WriteHeader(http.StatusNotFound)
