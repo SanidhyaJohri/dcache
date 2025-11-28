@@ -1,32 +1,63 @@
 version: '3.8'
 
 services:
-  dev:
+  node1:
     build:
       context: .
       dockerfile: Dockerfile.dev
-    volumes:
-      - .:/app
-      - go-cache:/go/pkg/mod
     ports:
-      - "8080:8080"
+      - "8001:8080"
       - "6379:6379"
-      - "2345:2345"
+      - "7946:7946/udp"
     environment:
-      - CGO_ENABLED=0
-      - GOOS=linux
-      - GOARCH=amd64
-      - ENV=development
+      - NODE_ID=node1
+      - CLUSTER_MODE=true
+      - GOSSIP_PORT=7946
       - HTTP_PORT=8080
       - TCP_PORT=6379
-      - NODE_ID=node1
-      - CAPACITY=10000
-      - MAX_SIZE_MB=100
     networks:
       - dcache-net
 
-volumes:
-  go-cache:
+  node2:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "8002:8080"
+      - "6380:6379"
+      - "7947:7946/udp"
+    environment:
+      - NODE_ID=node2
+      - CLUSTER_MODE=true
+      - GOSSIP_PORT=7946
+      - SEED_NODES=node1:7946
+      - HTTP_PORT=8080
+      - TCP_PORT=6379
+    networks:
+      - dcache-net
+    depends_on:
+      - node1
+
+  node3:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "8003:8080"
+      - "6381:6379"
+      - "7948:7946/udp"
+    environment:
+      - NODE_ID=node3
+      - CLUSTER_MODE=true
+      - GOSSIP_PORT=7946
+      - SEED_NODES=node1:7946,node2:7946
+      - HTTP_PORT=8080
+      - TCP_PORT=6379
+    networks:
+      - dcache-net
+    depends_on:
+      - node1
+      - node2
 
 networks:
   dcache-net:
