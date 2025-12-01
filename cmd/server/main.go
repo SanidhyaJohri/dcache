@@ -19,19 +19,6 @@ import (
 	"github.com/sjohri/dcache/internal/server"
 )
 
-// NodeStatus string representation
-func nodeStatusString(status cluster.NodeStatus) string {
-	switch status {
-	case cluster.NodeHealthy:
-		return "healthy"
-	case cluster.NodeSuspect:
-		return "suspect"
-	case cluster.NodeDead:
-		return "dead"
-	default:
-		return "unknown"
-	}
-}
 // Config holds server configuration
 type Config struct {
 	HTTPPort     string
@@ -46,6 +33,21 @@ type Config struct {
 	GossipPort   string
 	SeedNodes    []string
 	VirtualNodes int
+	NodeAddress  string  // Added for proper HTTP address
+}
+
+// Helper function to convert NodeStatus to string
+func nodeStatusString(status cluster.NodeStatus) string {
+	switch status {
+	case cluster.NodeHealthy:
+		return "healthy"
+	case cluster.NodeSuspect:
+		return "suspect"
+	case cluster.NodeDead:
+		return "dead"
+	default:
+		return "unknown"
+	}
 }
 
 var startTime = time.Now()
@@ -72,6 +74,9 @@ func main() {
 		// Initialize node manager
 		nodeManager = cluster.NewNodeManager(config.NodeID, config.VirtualNodes)
 		
+		// Update local node with proper HTTP address
+		nodeManager.UpdateNodeAddress(config.NodeID, config.NodeAddress)
+		
 		// Start gossip protocol
 		gossipAddr := fmt.Sprintf(":%s", config.GossipPort)
 		gossip = cluster.NewGossipProtocol(nodeManager, gossipAddr, config.SeedNodes)
@@ -81,6 +86,7 @@ func main() {
 		}
 		
 		log.Printf("Cluster mode enabled with %d virtual nodes", config.VirtualNodes)
+		log.Printf("Node HTTP address: %s", config.NodeAddress)
 		log.Printf("Gossip listening on port %s", config.GossipPort)
 		if len(config.SeedNodes) > 0 {
 			log.Printf("Seed nodes: %v", config.SeedNodes)
@@ -121,6 +127,9 @@ func parseFlags() *Config {
 	
 	config.DefaultTTL = time.Duration(*ttlMinutes) * time.Minute
 	
+	// Set node address - use NODE_ADDRESS env var if available
+	config.NodeAddress = getEnv("NODE_ADDRESS", fmt.Sprintf("localhost:%s", config.HTTPPort))
+	
 	// Parse seed nodes from environment or flags
 	if seedNodesEnv := os.Getenv("SEED_NODES"); seedNodesEnv != "" {
 		config.SeedNodes = strings.Split(seedNodesEnv, ",")
@@ -145,6 +154,7 @@ func printBanner(config *Config) {
 	
 	if config.ClusterMode {
 		fmt.Printf("Cluster:      Enabled\n")
+		fmt.Printf("Node Address: %s\n", config.NodeAddress)
 		fmt.Printf("Gossip Port:  %s\n", config.GossipPort)
 		fmt.Printf("Virtual Nodes: %d\n", config.VirtualNodes)
 	}
@@ -205,7 +215,7 @@ func startHTTPServer(config *Config, cacheStore *cache.Store, nodeManager *clust
 				w.Header().Set("X-Redirect-Node", targetNode.ID)
 				w.Header().Set("X-Redirect-Address", targetNode.Address)
 				w.WriteHeader(http.StatusTemporaryRedirect)
-				w.Write([]byte(fmt.Sprintf("Key belongs to node %s\n", targetNode.ID)))
+				w.Write([]byte(fmt.Sprintf("Key belongs to node %s at %s\n", targetNode.ID, targetNode.Address)))
 				return
 			}
 		}
@@ -254,7 +264,7 @@ func startHTTPServer(config *Config, cacheStore *cache.Store, nodeManager *clust
 				nodeInfo := map[string]interface{}{
 					"id":        node.ID,
 					"address":   node.Address,
-					"status":    nodeStatusString(node.Status),  // Use the function here
+					"status":    nodeStatusString(node.Status),
 					"last_seen": node.LastSeen.Format(time.RFC3339),
 				}
 				

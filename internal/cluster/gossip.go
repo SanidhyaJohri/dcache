@@ -154,7 +154,7 @@ func (g *GossipProtocol) announce() {
 	msg := &GossipMessage{
 		Type:      "announce",
 		NodeID:    g.nodeManager.GetLocalNodeID(),
-		NodeAddr:  g.localAddr,
+		NodeAddr:  g.nodeManager.nodes[g.nodeManager.GetLocalNodeID()].Address,  // Use HTTP address
 		Timestamp: time.Now(),
 		Data:      make(map[string]string),
 	}

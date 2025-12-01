@@ -5,29 +5,37 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.dev
+    hostname: node1
+    container_name: dcache-node1
     ports:
       - "8001:8080"
       - "6379:6379"
       - "7946:7946/udp"
     environment:
       - NODE_ID=node1
+      - NODE_ADDRESS=node1:8080
       - CLUSTER_MODE=true
       - GOSSIP_PORT=7946
       - HTTP_PORT=8080
       - TCP_PORT=6379
     networks:
       - dcache-net
+    volumes:
+      - .:/app
 
   node2:
     build:
       context: .
       dockerfile: Dockerfile.dev
+    hostname: node2
+    container_name: dcache-node2
     ports:
       - "8002:8080"
       - "6380:6379"
       - "7947:7946/udp"
     environment:
       - NODE_ID=node2
+      - NODE_ADDRESS=node2:8080
       - CLUSTER_MODE=true
       - GOSSIP_PORT=7946
       - SEED_NODES=node1:7946
@@ -35,6 +43,8 @@ services:
       - TCP_PORT=6379
     networks:
       - dcache-net
+    volumes:
+      - .:/app
     depends_on:
       - node1
 
@@ -42,12 +52,15 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.dev
+    hostname: node3
+    container_name: dcache-node3
     ports:
       - "8003:8080"
       - "6381:6379"
       - "7948:7946/udp"
     environment:
       - NODE_ID=node3
+      - NODE_ADDRESS=node3:8080
       - CLUSTER_MODE=true
       - GOSSIP_PORT=7946
       - SEED_NODES=node1:7946,node2:7946
@@ -55,6 +68,8 @@ services:
       - TCP_PORT=6379
     networks:
       - dcache-net
+    volumes:
+      - .:/app
     depends_on:
       - node1
       - node2
