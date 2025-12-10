@@ -159,3 +159,4 @@ func (vc *VectorClock) Size() int {
 func (vc *VectorClock) IsEmpty() bool {
 	return vc.Size() == 0
 }
+ 
