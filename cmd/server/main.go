@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -16,6 +17,9 @@ import (
 	
 	"github.com/sjohri/dcache/internal/cache"
 	"github.com/sjohri/dcache/internal/cluster"
+	"github.com/sjohri/dcache/internal/consistency"
+	"github.com/sjohri/dcache/internal/repair"
+	"github.com/sjohri/dcache/internal/replication"
 	"github.com/sjohri/dcache/internal/server"
 )
 
@@ -33,7 +37,14 @@ type Config struct {
 	GossipPort   string
 	SeedNodes    []string
 	VirtualNodes int
-	NodeAddress  string  // Added for proper HTTP address
+	NodeAddress  string
+	
+	// Replication configuration
+	ReplicationFactor   int
+	WriteQuorum        int
+	ReadQuorum         int
+	AntiEntropyInterval time.Duration
+	ReadRepairEnabled  bool
 }
 
 // Helper function to convert NodeStatus to string
@@ -69,6 +80,9 @@ func main() {
 	// Initialize cluster components if in cluster mode
 	var nodeManager *cluster.NodeManager
 	var gossip *cluster.GossipProtocol
+	var replicator *replication.Replicator
+	var antiEntropy *consistency.AntiEntropy
+	var readRepair *repair.ReadRepair
 	
 	if config.ClusterMode {
 		// Initialize node manager
@@ -91,6 +105,28 @@ func main() {
 		if len(config.SeedNodes) > 0 {
 			log.Printf("Seed nodes: %v", config.SeedNodes)
 		}
+		
+		// Initialize replication if configured
+		if config.ReplicationFactor > 1 {
+			repConfig := &replication.ReplicationConfig{
+				ReplicationFactor: config.ReplicationFactor,
+				WriteQuorum:      config.WriteQuorum,
+				ReadQuorum:       config.ReadQuorum,
+				Timeout:          5 * time.Second,
+			}
+			
+			replicator = replication.NewReplicator(repConfig, nodeManager)
+			
+			// Initialize anti-entropy
+			antiEntropy = consistency.NewAntiEntropy(nodeManager, config.AntiEntropyInterval)
+			antiEntropy.Start()
+			
+			// Initialize read repair
+			readRepair = repair.NewReadRepair(replicator, config.ReadRepairEnabled)
+			
+			log.Printf("Replication enabled: N=%d, W=%d, R=%d", 
+				config.ReplicationFactor, config.WriteQuorum, config.ReadQuorum)
+		}
 	}
 	
 	// Start TCP server
@@ -99,11 +135,11 @@ func main() {
 		log.Fatalf("Failed to start TCP server: %v", err)
 	}
 	
-	// Start HTTP server (for easy testing and monitoring)
-	httpServer := startHTTPServer(config, cacheStore, nodeManager)
+	// Start HTTP server
+	httpServer := startHTTPServer(config, cacheStore, nodeManager, replicator, readRepair)
 	
 	// Wait for shutdown signal
-	waitForShutdown(tcpServer, httpServer, gossip)
+	waitForShutdown(tcpServer, httpServer, gossip, antiEntropy)
 }
 
 func parseFlags() *Config {
@@ -123,9 +159,23 @@ func parseFlags() *Config {
 	flag.StringVar(&config.GossipPort, "gossip-port", getEnv("GOSSIP_PORT", "7946"), "Gossip protocol port")
 	flag.IntVar(&config.VirtualNodes, "virtual-nodes", getEnvInt("VIRTUAL_NODES", 150), "Virtual nodes per physical node")
 	
+	// Replication configuration
+	flag.IntVar(&config.ReplicationFactor, "replication-factor", 
+		getEnvInt("REPLICATION_FACTOR", 3), "Number of replicas")
+	flag.IntVar(&config.WriteQuorum, "write-quorum", 
+		getEnvInt("WRITE_QUORUM", 2), "Write quorum size")
+	flag.IntVar(&config.ReadQuorum, "read-quorum", 
+		getEnvInt("READ_QUORUM", 2), "Read quorum size")
+	
+	antiEntropySeconds := flag.Int("anti-entropy", 
+		getEnvInt("ANTI_ENTROPY_INTERVAL", 30), "Anti-entropy interval in seconds")
+	flag.BoolVar(&config.ReadRepairEnabled, "read-repair", 
+		getEnvBool("READ_REPAIR_ENABLED", true), "Enable read repair")
+	
 	flag.Parse()
 	
 	config.DefaultTTL = time.Duration(*ttlMinutes) * time.Minute
+	config.AntiEntropyInterval = time.Duration(*antiEntropySeconds) * time.Second
 	
 	// Set node address - use NODE_ADDRESS env var if available
 	config.NodeAddress = getEnv("NODE_ADDRESS", fmt.Sprintf("localhost:%s", config.HTTPPort))
@@ -157,12 +207,22 @@ func printBanner(config *Config) {
 		fmt.Printf("Node Address: %s\n", config.NodeAddress)
 		fmt.Printf("Gossip Port:  %s\n", config.GossipPort)
 		fmt.Printf("Virtual Nodes: %d\n", config.VirtualNodes)
+		
+		if config.ReplicationFactor > 1 {
+			fmt.Printf("Replication:  N=%d, W=%d, R=%d\n", 
+				config.ReplicationFactor, config.WriteQuorum, config.ReadQuorum)
+			fmt.Printf("Anti-Entropy: Every %v\n", config.AntiEntropyInterval)
+			fmt.Printf("Read Repair:  %v\n", config.ReadRepairEnabled)
+		}
 	}
 	
 	fmt.Println()
 }
 
-func startHTTPServer(config *Config, cacheStore *cache.Store, nodeManager *cluster.NodeManager) *http.Server {
+func startHTTPServer(config *Config, cacheStore *cache.Store, 
+	nodeManager *cluster.NodeManager, replicator *replication.Replicator,
+	readRepair *repair.ReadRepair) *http.Server {
+	
 	mux := http.NewServeMux()
 	
 	// Health check
@@ -176,6 +236,12 @@ func startHTTPServer(config *Config, cacheStore *cache.Store, nodeManager *clust
 		if config.ClusterMode {
 			response["cluster_mode"] = true
 			response["cluster_size"] = len(nodeManager.GetAllNodes())
+			
+			if config.ReplicationFactor > 1 {
+				response["replication_factor"] = config.ReplicationFactor
+				response["write_quorum"] = config.WriteQuorum
+				response["read_quorum"] = config.ReadQuorum
+			}
 		}
 		
 		w.Header().Set("Content-Type", "application/json")
@@ -191,17 +257,64 @@ func startHTTPServer(config *Config, cacheStore *cache.Store, nodeManager *clust
 		if config.ClusterMode {
 			stats["cluster_mode"] = true
 			stats["cluster_nodes"] = len(nodeManager.GetAllNodes())
+			
+			if readRepair != nil && readRepair.IsEnabled() {
+				repairStats := readRepair.GetStats()
+				stats["repairs_performed"] = repairStats.RepairsPerformed
+				stats["repairs_succeeded"] = repairStats.RepairsSucceeded
+				stats["repairs_failed"] = repairStats.RepairsFailed
+			}
 		}
 		
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(stats)
 	})
 	
-	// Cache operations via HTTP (for testing)
+	// Replication endpoints
+	if config.ClusterMode && replicator != nil {
+		mux.HandleFunc("/replicate/", func(w http.ResponseWriter, r *http.Request) {
+			key := r.URL.Path[len("/replicate/"):]
+			
+			// Check if this is a replication request
+			if r.Header.Get("X-Replication") != "true" {
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte("Direct access to replication endpoint forbidden\n"))
+				return
+			}
+			
+			switch r.Method {
+			case http.MethodGet:
+				handleReplicatedGet(w, r, cacheStore, key)
+			case http.MethodPost, http.MethodPut:
+				handleReplicatedSet(w, r, cacheStore, key)
+			case http.MethodDelete:
+				handleReplicatedDelete(w, r, cacheStore, key)
+			default:
+				w.WriteHeader(http.StatusMethodNotAllowed)
+			}
+		})
+	}
+	
+	// Cache operations via HTTP
 	mux.HandleFunc("/cache/", func(w http.ResponseWriter, r *http.Request) {
 		key := r.URL.Path[len("/cache/"):]
 		
-		// In cluster mode, check if this is the right node
+		// Use replication if enabled
+		if config.ClusterMode && replicator != nil {
+			switch r.Method {
+			case http.MethodGet:
+				handleQuorumGet(w, r, replicator, key)
+			case http.MethodPost, http.MethodPut:
+				handleQuorumSet(w, r, replicator, key)
+			case http.MethodDelete:
+				handleQuorumDelete(w, r, replicator, key)
+			default:
+				w.WriteHeader(http.StatusMethodNotAllowed)
+			}
+			return
+		}
+		
+		// Fall back to single-node operations
 		if config.ClusterMode && nodeManager != nil {
 			targetNode, err := nodeManager.GetNodeForKey(key)
 			if err != nil {
@@ -229,7 +342,6 @@ func startHTTPServer(config *Config, cacheStore *cache.Store, nodeManager *clust
 			handleHTTPDelete(w, r, cacheStore, key)
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
-			w.Write([]byte("Method not allowed"))
 		}
 	})
 	
@@ -327,6 +439,19 @@ func startHTTPServer(config *Config, cacheStore *cache.Store, nodeManager *clust
 				"local":   nodeManager.IsLocalNode(node.ID),
 			}
 			
+			// Add replica information if replication is enabled
+			if config.ReplicationFactor > 1 {
+				replicas, _ := nodeManager.GetNodesForKey(key, config.ReplicationFactor)
+				var replicaInfo []map[string]string
+				for _, replica := range replicas {
+					replicaInfo = append(replicaInfo, map[string]string{
+						"id":      replica.ID,
+						"address": replica.Address,
+					})
+				}
+				response["replicas"] = replicaInfo
+			}
+			
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(response)
 		})
@@ -347,6 +472,102 @@ func startHTTPServer(config *Config, cacheStore *cache.Store, nodeManager *clust
 	return server
 }
 
+// Quorum operation handlers
+func handleQuorumGet(w http.ResponseWriter, r *http.Request, replicator *replication.Replicator, key string) {
+	value, vectorClock, err := replicator.Read(key)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(fmt.Sprintf("Key not found: %v\n", err)))
+		return
+	}
+	
+	// Add vector clock to response header
+	if vectorClock != nil {
+		vcJSON, _ := json.Marshal(vectorClock)
+		w.Header().Set("X-Vector-Clock", string(vcJSON))
+	}
+	
+	w.Header().Set("X-Cache-Hit", "true")
+	w.Write(value)
+}
+
+func handleQuorumSet(w http.ResponseWriter, r *http.Request, replicator *replication.Replicator, key string) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Failed to read body\n"))
+		return
+	}
+	defer r.Body.Close()
+	
+	vectorClock, err := replicator.Write(key, body)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(fmt.Sprintf("Failed to store: %v\n", err)))
+		return
+	}
+	
+	// Return vector clock in response
+	if vectorClock != nil {
+		vcJSON, _ := json.Marshal(vectorClock)
+		w.Header().Set("X-Vector-Clock", string(vcJSON))
+	}
+	
+	w.WriteHeader(http.StatusCreated)
+	w.Write([]byte("Stored with replication\n"))
+}
+
+func handleQuorumDelete(w http.ResponseWriter, r *http.Request, replicator *replication.Replicator, key string) {
+	if err := replicator.Delete(key); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(fmt.Sprintf("Failed to delete: %v\n", err)))
+		return
+	}
+	
+	w.Write([]byte("Deleted from all replicas\n"))
+}
+
+// Replication endpoint handlers
+func handleReplicatedGet(w http.ResponseWriter, r *http.Request, cache *cache.Store, key string) {
+	value, found := cache.Get(key)
+	if !found {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	
+	// Return as replicated value with metadata
+	repValue := replication.ReplicatedValue{
+		Data:        value,
+		VectorClock: consistency.NewVectorClock(), // Would get actual VC from cache
+		Timestamp:   time.Now(),
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(repValue)
+}
+
+func handleReplicatedSet(w http.ResponseWriter, r *http.Request, cache *cache.Store, key string) {
+	var repValue replication.ReplicatedValue
+	if err := json.NewDecoder(r.Body).Decode(&repValue); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	
+	// Store in local cache
+	if err := cache.Set(key, repValue.Data); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	
+	w.WriteHeader(http.StatusCreated)
+}
+
+func handleReplicatedDelete(w http.ResponseWriter, r *http.Request, cache *cache.Store, key string) {
+	cache.Delete(key)
+	w.WriteHeader(http.StatusOK)
+}
+
+// Original handlers (unchanged)
 func handleHTTPGet(w http.ResponseWriter, _ *http.Request, cache *cache.Store, key string) {
 	value, found := cache.Get(key)
 	if !found {
@@ -360,7 +581,6 @@ func handleHTTPGet(w http.ResponseWriter, _ *http.Request, cache *cache.Store, k
 }
 
 func handleHTTPSet(w http.ResponseWriter, r *http.Request, cache *cache.Store, key string) {
-	// Read body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -369,7 +589,6 @@ func handleHTTPSet(w http.ResponseWriter, r *http.Request, cache *cache.Store, k
 	}
 	defer r.Body.Close()
 	
-	// Check for TTL header
 	var ttl time.Duration
 	if ttlStr := r.Header.Get("X-TTL-Seconds"); ttlStr != "" {
 		if seconds, err := strconv.Atoi(ttlStr); err == nil {
@@ -377,7 +596,6 @@ func handleHTTPSet(w http.ResponseWriter, r *http.Request, cache *cache.Store, k
 		}
 	}
 	
-	// Store in cache
 	if ttl > 0 {
 		err = cache.SetWithTTL(key, body, ttl)
 	} else {
@@ -403,7 +621,9 @@ func handleHTTPDelete(w http.ResponseWriter, _ *http.Request, cache *cache.Store
 	}
 }
 
-func waitForShutdown(tcpServer *server.Server, httpServer *http.Server, gossip *cluster.GossipProtocol) {
+func waitForShutdown(tcpServer *server.Server, httpServer *http.Server, 
+	gossip *cluster.GossipProtocol, antiEntropy *consistency.AntiEntropy) {
+	
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	
@@ -413,11 +633,16 @@ func waitForShutdown(tcpServer *server.Server, httpServer *http.Server, gossip *
 	// Graceful shutdown
 	log.Println("Shutting down servers...")
 	
+	// Stop anti-entropy if running
+	if antiEntropy != nil {
+		antiEntropy.Stop()
+	}
+	
 	// Leave cluster if in cluster mode
 	if gossip != nil {
 		log.Println("Leaving cluster...")
 		gossip.Leave()
-		time.Sleep(500 * time.Millisecond) // Give time for leave message to propagate
+		time.Sleep(500 * time.Millisecond)
 		gossip.Stop()
 	}
 	
