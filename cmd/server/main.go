@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -473,7 +472,7 @@ func startHTTPServer(config *Config, cacheStore *cache.Store,
 }
 
 // Quorum operation handlers
-func handleQuorumGet(w http.ResponseWriter, r *http.Request, replicator *replication.Replicator, key string) {
+func handleQuorumGet(w http.ResponseWriter, _ *http.Request, replicator *replication.Replicator, key string) {
 	value, vectorClock, err := replicator.Read(key)
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
@@ -517,7 +516,7 @@ func handleQuorumSet(w http.ResponseWriter, r *http.Request, replicator *replica
 	w.Write([]byte("Stored with replication\n"))
 }
 
-func handleQuorumDelete(w http.ResponseWriter, r *http.Request, replicator *replication.Replicator, key string) {
+func handleQuorumDelete(w http.ResponseWriter, _ *http.Request, replicator *replication.Replicator, key string) {
 	if err := replicator.Delete(key); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(fmt.Sprintf("Failed to delete: %v\n", err)))
@@ -528,7 +527,7 @@ func handleQuorumDelete(w http.ResponseWriter, r *http.Request, replicator *repl
 }
 
 // Replication endpoint handlers
-func handleReplicatedGet(w http.ResponseWriter, r *http.Request, cache *cache.Store, key string) {
+func handleReplicatedGet(w http.ResponseWriter, _ *http.Request, cache *cache.Store, key string) {
 	value, found := cache.Get(key)
 	if !found {
 		w.WriteHeader(http.StatusNotFound)
@@ -562,7 +561,7 @@ func handleReplicatedSet(w http.ResponseWriter, r *http.Request, cache *cache.St
 	w.WriteHeader(http.StatusCreated)
 }
 
-func handleReplicatedDelete(w http.ResponseWriter, r *http.Request, cache *cache.Store, key string) {
+func handleReplicatedDelete(w http.ResponseWriter, _ *http.Request, cache *cache.Store, key string) {
 	cache.Delete(key)
 	w.WriteHeader(http.StatusOK)
 }
