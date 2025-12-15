@@ -1,6 +1,7 @@
 package consistency
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
