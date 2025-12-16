@@ -23,11 +23,12 @@ type ReplicationConfig struct {
 }
 
 // Replicator manages data replication across nodes
+// Replicator manages data replication across nodes
 type Replicator struct {
 	config      *ReplicationConfig
 	nodeManager *cluster.NodeManager
 	httpClient  *http.Client
-	mu          sync.RWMutex
+	// Remove this line: mu          sync.RWMutex
 }
 
 // NewReplicator creates a new replicator
@@ -46,6 +47,13 @@ type ReplicatedValue struct {
 	Data        []byte                   `json:"data"`
 	VectorClock *consistency.VectorClock `json:"vector_clock"`
 	Timestamp   time.Time                `json:"timestamp"`
+}
+
+// readResult is used for collecting read results from replicas
+type readResult struct {
+	value *ReplicatedValue
+	node  string
+	err   error
 }
 
 // Write performs a quorum write to replicas
@@ -122,16 +130,9 @@ func (r *Replicator) Read(key string) ([]byte, *consistency.VectorClock, error) 
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get replicas: %v", err)
 	}
-
-	// Read from replicas
-	type readResult struct {
-		value *ReplicatedValue
-		node  string
-		err   error
-	}
-
+	
 	resultChan := make(chan readResult, len(replicas))
-
+	
 	for _, replica := range replicas {
 		go func(node *cluster.Node) {
 			value, err := r.readFromNode(node, key)
@@ -142,35 +143,37 @@ func (r *Replicator) Read(key string) ([]byte, *consistency.VectorClock, error) 
 			}
 		}(replica)
 	}
-
+	
 	// Collect results
 	var results []readResult
 	timeout := time.NewTimer(r.config.Timeout)
 	defer timeout.Stop()
-
+	
+	// Use a label for the outer loop
+	collectLoop:
 	for i := 0; i < len(replicas); i++ {
 		select {
 		case result := <-resultChan:
 			if result.err == nil && result.value != nil {
 				results = append(results, result)
 			}
-
+			
 			// Check if quorum reached
 			if len(results) >= r.config.ReadQuorum {
 				// Find the most recent value
 				latest := r.findLatestValue(results)
-
+				
 				// Trigger read repair if needed
 				go r.repairIfNeeded(key, results, latest)
-
+				
 				return latest.value.Data, latest.value.VectorClock, nil
 			}
-
+			
 		case <-timeout.C:
-			break
+			break collectLoop  // This now breaks the outer loop
 		}
 	}
-
+	
 	return nil, nil, fmt.Errorf("read quorum not reached: %d/%d", len(results), r.config.ReadQuorum)
 }
 
