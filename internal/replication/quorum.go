@@ -2,7 +2,6 @@ package replication
 
 import (
 	"fmt"
-	"sync"
 	"time"
 )
 
